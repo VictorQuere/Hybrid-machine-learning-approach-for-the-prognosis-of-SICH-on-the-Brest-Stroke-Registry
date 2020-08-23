@@ -1,0 +1,336 @@
+#imports bibliothèques
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+#import des données
+df = pd.read_csv('df_j30.csv',sep=',',header=0, na_values = 'nan')
+df = df.drop(['TEMP','SATO2','FC','AVC_DTC','ATCD_ARYTH','POIDS','TAILLE','ATCD_AVC','ATCD_AIT','ATCD_TABAC','ATCD_ETHYL','ATCD_FAM',
+              'AVC_MED_P','AVC_HOSP','ENTREE_PARA','ENTREE_FIBRATE'],axis=1)
+
+
+#############################################################################
+                                #Pre-processing
+#############################################################################
+from sklearn.model_selection import train_test_split
+
+##Feature engineering
+def feature_engineering_atherome (df) :
+    
+    if df['ATCD_CAROT']== 'OUI' :
+        return 'OUI'
+    elif df['ATCD_CORO']== 'OUI' :
+        return 'OUI'
+    elif df['ATCD_ARTERIO']== 'OUI' :
+        return 'OUI'
+    else :
+        return 'NON'
+    
+df['maladie_athero'] = df.apply(feature_engineering_atherome, axis=1)       
+
+def feature_engineering_AC (df) :
+    
+    if df['ENTREE_HBPM']== 'OUI' :
+        return 'OUI'
+    elif df['ENTREE_NACO']== 'OUI' :
+        return 'OUI'
+    elif df['ENTREE_K']== 'OUI' :
+        return 'OUI'
+    else :
+        return 'NON'
+    
+df['AC'] = df.apply(feature_engineering_AC, axis=1)
+
+
+##Encodage One Hot
+dummies = pd.get_dummies(df[['SEXE','ATCD_HTA','AC','maladie_athero',
+                             'ATCD_DIAB','ATCD_DYSLIP','HEMO_LOC',
+                             'ENTREE_HYPER','ENTREE_AGG','ENTREE_STATINE',
+                             'statut_j30']],drop_first=True, dummy_na=True)
+
+df = pd.concat([df.drop(['SEXE','ATCD_CAROT','ATCD_CORO','maladie_athero',
+                         'ATCD_ARTERIO','ATCD_HTA','ATCD_DIAB','ATCD_DYSLIP','LACUNE',
+                         'EPIL','HEMO_LOC','ENTREE_HYPER','ENTREE_K','AC','ENTREE_AGG',
+                         'ENTREE_HBPM','ENTREE_NACO','ENTREE_STATINE',
+                         'statut_j30'],axis=1), dummies],axis=1)
+
+
+##Imputation
+def imputation(df):
+
+    return df.fillna(df.median())
+    
+
+##Preprocessing final
+def preprocessing(df):
+    
+    df= imputation(df)
+    
+    X= df.drop(['statut_j30_Vivant','statut_j30_nan'], axis=1)
+    y= df['statut_j30_Vivant']
+    
+    print (y.value_counts())
+    
+    return X,y
+
+X, y = preprocessing(df)
+
+
+#############################################################################
+                #SelectFromModel avec Arbre
+#############################################################################
+from sklearn.feature_selection import SelectFromModel
+from sklearn.tree import DecisionTreeClassifier
+#from sklearn.tree import plot_tree
+
+
+#arbre de décision pour séléction des variables en fonction du Mean decrease in Gini
+DecisionTree = DecisionTreeClassifier (criterion = 'gini', splitter = 'best', max_depth = None, min_samples_split = 2, min_samples_leaf =1, max_features = None, random_state=0)
+DecisionTree = DecisionTree.fit(X, y)
+Selection_model = SelectFromModel(DecisionTree, prefit = True, threshold=-np.inf, max_features = 8)
+cols = Selection_model.get_support(indices=True)
+features_X_new = X.iloc[:,cols]
+selected_features_name = features_X_new.columns
+X_new = pd.DataFrame(Selection_model.transform(X), index=None, columns= selected_features_name)
+
+#Représentation arbre de décision
+#plt.figure(figsize=(170,170))
+#plot_tree(DecisionTree,feature_names = list(df.columns[:-1]),filled=True)
+#plt.show()
+
+#Représentation feature importance
+pd.DataFrame(DecisionTree.feature_importances_, index= X.columns).plot.bar(figsize=(20,12))
+plt.ylabel('Décroissance moyenne du Gini')
+
+
+#############################################################################
+         #séparation en données de test et d'entrainement
+#############################################################################
+X_train, X_test, y_train, y_test = train_test_split(X_new, y, test_size=0.20, random_state = 0)
+
+
+#############################################################################
+         #KMeans sur les données après selection des features
+#############################################################################
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+
+##Technique du coude pour déterminer le nombre idéal de cluster
+SS = StandardScaler()
+X_train_stand = SS.fit_transform(X_train)
+
+Sum_of_squared_distances = []
+K = range (1,15)
+
+for nb_clusters in K:
+    kme = KMeans(n_clusters=nb_clusters, random_state=0)
+    kme = kme.fit(X_train_stand)
+    Sum_of_squared_distances.append(kme.inertia_)
+
+plt.plot(K,Sum_of_squared_distances,'bx-')
+plt.xlabel('Nombre de cluster')
+plt.ylabel('Somme des erreurs quadratiques')
+plt.show()
+
+##KMeans pour diviser les variables en clusters suite aux résultats de la technique du coude
+df_train_label = pd.DataFrame()
+KM = make_pipeline (StandardScaler(), KMeans(n_clusters = 4, random_state = 0))
+KM.fit(X_train)
+
+#Création d'un nouveau dataframe par cluster
+cluster_map_train = pd.DataFrame(index=X_train.index)
+cluster_map_train['cluster'] = KM['kmeans'].labels_
+df_train_labels = pd.concat([X_train, cluster_map_train, y_train], axis=1)
+
+df_train_label_0 = df_train_labels[df_train_labels['cluster'] == 0]
+df_train_label_1 = df_train_labels[df_train_labels['cluster'] == 1]
+df_train_label_2 = df_train_labels[df_train_labels['cluster'] == 2]
+df_train_label_3 = df_train_labels[df_train_labels['cluster'] == 3]
+
+#Séparation des clusters en variable X et y pour classification finale
+def preprocessing_2 (df):
+    
+    X= df.drop (['statut_j30_Vivant','cluster'], axis=1)
+    y= df['statut_j30_Vivant']
+    
+    return X,y
+
+X_train_label_0, y_train_label_0 = preprocessing_2(df_train_label_0)
+X_train_label_1, y_train_label_1 = preprocessing_2(df_train_label_1)
+X_train_label_2, y_train_label_2 = preprocessing_2(df_train_label_2)
+X_train_label_3, y_train_label_3 = preprocessing_2(df_train_label_3)
+
+#clustering des données de test selon le KMeans des données d'entrainement
+cluster_map_test = pd.DataFrame(KM.predict(X_test),index = X_test.index, columns = ['cluster'])
+df_test_labels = pd.concat([X_test, cluster_map_test, y_test], axis=1)
+
+df_test_label_0 = df_test_labels[df_test_labels['cluster'] == 0]
+df_test_label_1 = df_test_labels[df_test_labels['cluster'] == 1]
+df_test_label_2 = df_test_labels[df_test_labels['cluster'] == 2]
+df_test_label_3 = df_test_labels[df_test_labels['cluster'] == 3]
+
+X_test_label_0, y_test_label_0 = preprocessing_2(df_test_label_0)
+X_test_label_1, y_test_label_1 = preprocessing_2(df_test_label_1)
+X_test_label_2, y_test_label_2 = preprocessing_2(df_test_label_2)
+X_test_label_3, y_test_label_3 = preprocessing_2(df_test_label_3)
+
+#############################################################################
+               #Analyse descriptive des clusters
+#############################################################################
+import seaborn as sns
+
+##nombre de vivant et mort par cluster
+print ('Nombre de patient en vie ou décédé à j30 dans le cluster 0 est de ', df_train_label_0['statut_j30_Vivant'].value_counts())
+print ('En pourcentage', df_train_label_0['statut_j30_Vivant'].value_counts()/df_train_label_0.shape[0])
+
+print ('Nombre de patient en vie ou décédé à j30 dans le cluster 1 est de ', df_train_label_1['statut_j30_Vivant'].value_counts())
+print ('En pourcentage', df_train_label_1['statut_j30_Vivant'].value_counts()/df_train_label_1.shape[0])
+
+print ('Nombre de patient en vie ou décédé à j30 dans le cluster 2 est de ', df_train_label_2['statut_j30_Vivant'].value_counts())
+print ('En pourcentage', df_train_label_2['statut_j30_Vivant'].value_counts()/df_train_label_2.shape[0])
+
+print ('Nombre de patient en vie ou décédé à j30 dans le cluster 3 est de ', df_train_label_3['statut_j30_Vivant'].value_counts())
+print ('En pourcentage', df_train_label_3['statut_j30_Vivant'].value_counts()/df_train_label_3.shape[0])
+
+##description des clusters
+df_train_label_0_desc = df_train_label_0.describe()
+df_train_label_1_desc = df_train_label_1.describe()
+df_train_label_2_desc = df_train_label_2.describe()
+df_train_label_3_desc = df_train_label_3.describe()
+
+print(df_train_label_0["statut_j30_Vivant"].value_counts())
+print(df_train_label_1["statut_j30_Vivant"].value_counts())
+print(df_train_label_2["statut_j30_Vivant"].value_counts())
+print(df_train_label_3["statut_j30_Vivant"].value_counts())
+
+##représentation graphique distplot
+for col in df_train_labels.select_dtypes('float') :
+    plt.figure()
+    plt.title('Comparaison des variables des clusters')
+    plt.xlabel(col)
+    plt.ylabel('Estimation de la densité  du noyau (KDE)')
+    sns.distplot(X_train_label_0[col], label="C0")
+    sns.distplot(X_train_label_1[col], label="C1")
+    sns.distplot(X_train_label_2[col], label="C2")
+    sns.distplot(X_train_label_3[col], label="C3")
+    plt.legend()
+
+##représentation graphique countplot des variables discrètes
+sns.countplot(x='AGE', hue='cluster', data = df_train_labels)
+sns.countplot(x='GLASGOW', hue='cluster', data = df_train_labels)
+sns.countplot(x='ATCD_RANKIN', hue='cluster', data = df_train_labels)
+sns.countplot(x='NIHSS_INIT', hue='cluster', data = df_train_labels)
+
+
+#############################################################################
+                           #Modelisation SVM
+#############################################################################
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+import sklearn.metrics as metrics
+from sklearn.metrics import classification_report,confusion_matrix,roc_auc_score
+
+
+##SVM sur les différent clusters avec optimisation des paramêtres dans une GridSearch
+SVM_0 = make_pipeline (StandardScaler(), SVC(random_state=0, class_weight ={0: 1.7,1: 1}))
+SVM_1 = make_pipeline (StandardScaler(), SVC(random_state=0, class_weight ="balanced"))
+SVM_2 = make_pipeline (StandardScaler(), SVC(random_state=0, class_weight ="balanced"))
+SVM_3 = make_pipeline (StandardScaler(), SVC(random_state=0, class_weight ="balanced"))
+
+hyper_params_0 = {'svc__gamma':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9],
+                'svc__C':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9]}
+
+hyper_params_1 = {'svc__gamma':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9],
+                'svc__C':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9]}
+
+hyper_params_2 = {'svc__gamma':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9],
+                'svc__C':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9]}
+
+hyper_params_3 = {'svc__gamma':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9],
+                'svc__C':[10e-9,10e-7,10e-5,10e-3,10e-1,10e1,10e3,10e5,10e7,10e9]}
+
+grid_label_0 = GridSearchCV(SVM_0, hyper_params_0, scoring='roc_auc', cv=4)
+grid_label_0.fit(X_train_label_0,y_train_label_0)
+print('best score :', grid_label_0.best_score_)
+print('les meilleurs paramêtres dans le cluster 0 sont :', grid_label_0.best_params_)
+grid_label_0 = grid_label_0.best_estimator_
+
+grid_label_1 = GridSearchCV(SVM_1, hyper_params_1, scoring='roc_auc', cv=4)
+grid_label_1.fit(X_train_label_1,y_train_label_1)
+print('best score :', grid_label_1.best_score_)
+print('les meilleurs paramêtres dans le cluster 1 sont :', grid_label_1.best_params_)
+grid_label_1 = grid_label_1.best_estimator_
+
+grid_label_2 = GridSearchCV(SVM_2, hyper_params_2, scoring='roc_auc', cv=4)
+grid_label_2.fit(X_train_label_2,y_train_label_2)
+print('les meilleurs paramêtres dans le cluster 2 sont :', grid_label_2.best_params_)
+print('best score :', grid_label_2.best_score_)
+grid_label_2 = grid_label_2.best_estimator_
+
+grid_label_3 = GridSearchCV(SVM_3, hyper_params_3, scoring='roc_auc', cv=4)
+grid_label_3.fit(X_train_label_3,y_train_label_3)
+print('les meilleurs paramêtres dans le cluster 3 sont :', grid_label_3.best_params_)
+print('best score :', grid_label_3.best_score_)
+grid_label_3 = grid_label_3.best_estimator_
+
+
+#############################################################################
+                          #Evaluation des résultats 
+#############################################################################
+##Résultats de chaque cluster
+y_0_pred = grid_label_0.predict(X_test_label_0)
+print ('Cluster_0')
+print (classification_report(y_test_label_0, y_0_pred))
+print (roc_auc_score (y_test_label_0, y_0_pred))
+print (confusion_matrix(y_test_label_0, y_0_pred))
+
+y_1_pred = grid_label_1.predict(X_test_label_1)
+print ('Cluster_1')
+print (classification_report(y_test_label_1, y_1_pred))
+print (roc_auc_score (y_test_label_1, y_1_pred))
+print (confusion_matrix(y_test_label_1, y_1_pred))
+
+y_2_pred = grid_label_2.predict(X_test_label_2)
+print ('Cluster_2')
+print (classification_report(y_test_label_2, y_2_pred))
+print (roc_auc_score (y_test_label_2, y_2_pred))
+print (confusion_matrix(y_test_label_2, y_2_pred))
+
+y_3_pred = grid_label_3.predict(X_test_label_3)
+print ('Cluster_3')
+print (classification_report(y_test_label_3, y_3_pred))
+print (roc_auc_score (y_test_label_3, y_3_pred))
+print (confusion_matrix(y_test_label_3, y_3_pred))
+
+
+##score du modèle global
+y_0_pred = pd.DataFrame(y_0_pred)
+y_1_pred = pd.DataFrame(y_1_pred)
+y_2_pred = pd.DataFrame(y_2_pred)
+y_3_pred = pd.DataFrame(y_3_pred)
+
+y_pred_total = pd.concat([y_test_label_0, y_test_label_1, y_test_label_2,y_test_label_3],axis=0)
+y_test_total = pd.concat([y_0_pred, y_1_pred, y_2_pred,y_3_pred ],axis=0)
+
+print("Score du modèle dans son ensemble")
+print(roc_auc_score(y_test_total,y_pred_total))
+print(classification_report(y_test_total,y_pred_total))
+
+##courbe de ROC :
+# calculate the fpr and tpr for all thresholds of the classification
+probs = y_test_total
+preds = y_pred_total
+fpr, tpr, threshold = metrics.roc_curve(y_test_total, y_pred_total)
+roc_auc = metrics.auc(fpr, tpr)
+
+#affichage de la courbe
+plt.plot(fpr, tpr, 'b', label = 'AUC = %0.2f' % roc_auc)
+plt.legend(loc = 'lower right')
+plt.plot([0, 1], [0, 1],'r--')
+plt.xlim([0, 1])
+plt.ylim([0, 1])
+plt.ylabel('True Positive Rate')
+plt.xlabel('False Positive Rate')
+plt.show()
